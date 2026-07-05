@@ -4,7 +4,9 @@
 #include <QTabWidget>
 #include <QRadioButton>
 #include <QSpinBox>
+#include <QCalendarWidget>
 #include <QDateTimeEdit>
+#include <QLabel>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QLineEdit>
@@ -33,10 +35,14 @@ private:
 	void PopulateTextSourceDropdown();
 	void UpdateTypeVisibility();
 
+	QDateTime SelectedTargetDateTime() const;
+	void SetTargetDateTime(const QDateTime &dt);
+
 private slots:
 	void OnTimerTypeChanged();
 	void OnAddTimeHotkeyAdd();
 	void OnAddTimeHotkeyRemove();
+	void UpdateTargetSummary();
 
 private:
 	QTabWidget *m_tabs;
@@ -54,7 +60,9 @@ private:
 	QSpinBox *m_secondsSpin;
 
 	QGroupBox *m_timeUntilGroup;
-	QDateTimeEdit *m_targetDateTimeEdit;
+	QCalendarWidget *m_calendar;
+	QTimeEdit *m_targetTimeEdit;
+	QLabel *m_targetSummaryLabel;
 
 	QComboBox *m_textSourceCombo;
 	QCheckBox *m_startOnStreamCheck;

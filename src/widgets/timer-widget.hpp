@@ -24,6 +24,7 @@ public:
 	void LoadData(obs_data_t *dataObj);
 
 	void RegisterHotkeys(obs_data_t *savedData);
+	void ReregisterAllHotkeys();
 	void UnregisterHotkeys();
 
 	void StartTimer();

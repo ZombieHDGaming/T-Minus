@@ -5,6 +5,7 @@
 #include <obs.h>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
+#include <util/platform.h>
 
 #include <QHBoxLayout>
 #include <QWidget>
@@ -21,33 +22,45 @@ TMinusDock::TMinusDock(QWidget *parent) : OBSDock(parent)
 TMinusDock::~TMinusDock()
 {
 	obs_frontend_remove_event_callback(OBSFrontendEventHandler, this);
-	SaveSettings();
+	if (!m_exitSaveDone)
+		SaveSettings();
 	UnregisterGlobalHotkeys();
 }
 
 void TMinusDock::SetupUI()
 {
 	auto *mainLayout = new QVBoxLayout(this);
-	mainLayout->setContentsMargins(4, 4, 4, 4);
+	mainLayout->setContentsMargins(0, 0, 0, 0);
+	mainLayout->setSpacing(0);
 
-	// OBS QSS strips background/border from QPushButton[class^="icon-"] to make
-	// transparent icon buttons. We override that here so toolbar buttons render
-	// as normal themed buttons while still carrying the class for icon loading.
-	const QString toolbarBtnStyle = "QPushButton {"
-					"  background-color: palette(Button);"
-					"  border: 1px solid palette(Dark);"
-					"  border-radius: 3px;"
-					"  padding: 2px;"
-					"}"
-					"QPushButton:hover { background-color: palette(Midlight); }"
-					"QPushButton:pressed { background-color: palette(Mid); }";
+	// Scrollable timer list. No frame and no background fill so the dock
+	// takes on the active OBS theme's window background, like native docks.
+	m_scrollArea = new QScrollArea(this);
+	m_scrollArea->setWidgetResizable(true);
+	m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	m_scrollArea->setFrameShape(QFrame::NoFrame);
+	m_scrollArea->viewport()->setAutoFillBackground(false);
 
-	// Toolbar
+	auto *scrollContent = new QWidget(m_scrollArea);
+	scrollContent->setAutoFillBackground(false);
+	m_timerListLayout = new QVBoxLayout(scrollContent);
+	m_timerListLayout->setContentsMargins(4, 4, 4, 4);
+	m_timerListLayout->setSpacing(4);
+	m_timerListLayout->addStretch();
+
+	m_scrollArea->setWidget(scrollContent);
+	mainLayout->addWidget(m_scrollArea, 1);
+
+	// Bottom toolbar, mirroring the native OBS dock toolbars (Sources,
+	// Scenes, Audio Mixer). The theme's "icon-*" class rules render these
+	// as flat themed icon buttons; themeID covers legacy themes.
 	auto *toolbar = new QHBoxLayout();
+	toolbar->setContentsMargins(4, 2, 4, 2);
+	toolbar->setSpacing(2);
 
 	m_addBtn = new QPushButton(this);
 	m_addBtn->setFixedSize(24, 24);
-	m_addBtn->setStyleSheet(toolbarBtnStyle);
+	m_addBtn->setFlat(true);
 	m_addBtn->setProperty("themeID", "addIconSmall");
 	m_addBtn->setProperty("class", "icon-plus");
 	m_addBtn->setToolTip("Add Timer");
@@ -57,7 +70,7 @@ void TMinusDock::SetupUI()
 
 	m_startAllBtn = new QPushButton(this);
 	m_startAllBtn->setFixedSize(24, 24);
-	m_startAllBtn->setStyleSheet(toolbarBtnStyle);
+	m_startAllBtn->setFlat(true);
 	m_startAllBtn->setProperty("themeID", "playIcon");
 	m_startAllBtn->setProperty("class", "icon-media-play");
 	m_startAllBtn->setToolTip("Start All Timers");
@@ -65,26 +78,13 @@ void TMinusDock::SetupUI()
 
 	m_stopAllBtn = new QPushButton(this);
 	m_stopAllBtn->setFixedSize(24, 24);
-	m_stopAllBtn->setStyleSheet(toolbarBtnStyle);
+	m_stopAllBtn->setFlat(true);
 	m_stopAllBtn->setProperty("themeID", "stopIcon");
 	m_stopAllBtn->setProperty("class", "icon-media-stop");
 	m_stopAllBtn->setToolTip("Stop All Timers");
 	toolbar->addWidget(m_stopAllBtn);
 
 	mainLayout->addLayout(toolbar);
-
-	// Scrollable timer list
-	m_scrollArea = new QScrollArea(this);
-	m_scrollArea->setWidgetResizable(true);
-	m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-
-	auto *scrollContent = new QWidget(m_scrollArea);
-	m_timerListLayout = new QVBoxLayout(scrollContent);
-	m_timerListLayout->setContentsMargins(0, 0, 0, 0);
-	m_timerListLayout->addStretch();
-
-	m_scrollArea->setWidget(scrollContent);
-	mainLayout->addWidget(m_scrollArea);
 
 	// Connections
 	connect(m_addBtn, &QPushButton::clicked, this, [this]() { AddTimer(); });
@@ -165,9 +165,60 @@ void TMinusDock::StopAllTimers()
 	}
 }
 
+QString TMinusDock::CurrentCollectionName()
+{
+	char *name = obs_frontend_get_current_scene_collection();
+	QString result = QString::fromUtf8(name ? name : "");
+	bfree(name);
+	return result.isEmpty() ? QStringLiteral("__default__") : result;
+}
+
+obs_data_t *TMinusDock::ReadConfigRoot() const
+{
+	obs_data_t *root = nullptr;
+
+	char *configPath = obs_module_config_path(CONFIG_FILE);
+	if (configPath) {
+		root = obs_data_create_from_json_file_safe(configPath, "bak");
+		bfree(configPath);
+	}
+
+	return root;
+}
+
+void TMinusDock::WriteConfigRoot(obs_data_t *root) const
+{
+	// The module config directory is not created by OBS automatically;
+	// without it obs_data_save_json fails silently and nothing persists.
+	char *configDir = obs_module_config_path("");
+	if (configDir) {
+		os_mkdirs(configDir);
+		bfree(configDir);
+	}
+
+	char *configPath = obs_module_config_path(CONFIG_FILE);
+	if (configPath) {
+		if (!obs_data_save_json_safe(root, configPath, "tmp", "bak"))
+			obs_log(LOG_WARNING, "Failed to save timer settings to %s", configPath);
+		bfree(configPath);
+	}
+}
+
 void TMinusDock::SaveSettings()
 {
-	obs_data_t *settings = obs_data_create();
+	if (m_loading)
+		return;
+
+	if (m_currentCollection.isEmpty())
+		m_currentCollection = CurrentCollectionName();
+
+	// Timers are stored per scene collection. Re-read the config so other
+	// collections' sections are preserved, then replace only ours.
+	obs_data_t *root = ReadConfigRoot();
+	if (!root)
+		root = obs_data_create();
+
+	obs_data_t *section = obs_data_create();
 	obs_data_array_t *timerArray = obs_data_array_create();
 
 	for (auto *timer : m_timers) {
@@ -177,53 +228,181 @@ void TMinusDock::SaveSettings()
 		obs_data_release(timerObj);
 	}
 
-	obs_data_set_array(settings, "timers", timerArray);
+	obs_data_set_array(section, "timers", timerArray);
 	obs_data_array_release(timerArray);
 
-	// Save hotkeys
-	SaveHotkey(settings, m_startAllHotkeyId, "TMinus_StartAll");
-	SaveHotkey(settings, m_stopAllHotkeyId, "TMinus_StopAll");
+	obs_data_t *collections = obs_data_get_obj(root, "collections");
+	if (!collections)
+		collections = obs_data_create();
+	obs_data_set_obj(collections, m_currentCollection.toUtf8().constData(), section);
+	obs_data_set_obj(root, "collections", collections);
+	obs_data_release(collections);
+	obs_data_release(section);
 
-	char *configPath = obs_module_config_path(CONFIG_FILE);
-	if (configPath) {
-		obs_data_save_json(settings, configPath);
-		bfree(configPath);
+	// Legacy single-collection format; drop once migrated
+	obs_data_erase(root, "timers");
+
+	// Global hotkeys apply across collections
+	SaveHotkey(root, m_startAllHotkeyId, "TMinus_StartAll");
+	SaveHotkey(root, m_stopAllHotkeyId, "TMinus_StopAll");
+
+	WriteConfigRoot(root);
+	obs_data_release(root);
+}
+
+void TMinusDock::LoadTimersFromSection(obs_data_t *section)
+{
+	obs_data_array_t *timerArray = obs_data_get_array(section, "timers");
+	if (!timerArray)
+		return;
+
+	size_t count = obs_data_array_count(timerArray);
+	for (size_t i = 0; i < count; i++) {
+		obs_data_t *timerObj = obs_data_array_item(timerArray, i);
+		AddTimer(timerObj);
+		obs_data_release(timerObj);
 	}
-
-	obs_data_release(settings);
+	obs_data_array_release(timerArray);
 }
 
 void TMinusDock::LoadSavedSettings()
 {
-	char *configPath = obs_module_config_path(CONFIG_FILE);
-	if (!configPath)
-		return;
+	m_loading = true;
 
-	obs_data_t *settings = obs_data_create_from_json_file(configPath);
-	bfree(configPath);
+	obs_data_t *root = ReadConfigRoot();
+	m_currentCollection = CurrentCollectionName();
 
-	if (!settings)
-		return;
-
-	obs_data_array_t *timerArray = obs_data_get_array(settings, "timers");
-	if (timerArray) {
-		size_t count = obs_data_array_count(timerArray);
-		for (size_t i = 0; i < count; i++) {
-			obs_data_t *timerObj = obs_data_array_item(timerArray, i);
-			AddTimer(timerObj);
-			obs_data_release(timerObj);
+	obs_data_t *section = nullptr;
+	if (root) {
+		obs_data_t *collections = obs_data_get_obj(root, "collections");
+		if (collections) {
+			section = obs_data_get_obj(collections, m_currentCollection.toUtf8().constData());
+			obs_data_release(collections);
 		}
-		obs_data_array_release(timerArray);
 	}
 
-	RegisterGlobalHotkeys(settings);
+	if (section) {
+		LoadTimersFromSection(section);
+		obs_data_release(section);
+	} else if (root) {
+		// Legacy global format: adopt top-level timers into the
+		// collection that is active on first load.
+		LoadTimersFromSection(root);
+	}
 
-	// Register per-timer hotkeys
+	// Register global hotkeys even on a fresh install (no settings file
+	// yet), otherwise they never show up in OBS Settings > Hotkeys.
+	RegisterGlobalHotkeys(root);
+
+	obs_data_release(root);
+
+	m_loading = false;
+}
+
+void TMinusDock::ClearTimers()
+{
 	for (auto *timer : m_timers) {
-		timer->RegisterHotkeys(settings);
+		// Unregister synchronously; deleteLater defers destruction
+		// until after the new collection's timers are created.
+		timer->UnregisterHotkeys();
+		m_timerListLayout->removeWidget(timer);
+		timer->deleteLater();
+	}
+	m_timers.clear();
+}
+
+void TMinusDock::ReloadForCurrentCollection()
+{
+	ClearTimers();
+
+	m_loading = true;
+
+	obs_data_t *root = ReadConfigRoot();
+	m_currentCollection = CurrentCollectionName();
+
+	if (root) {
+		obs_data_t *collections = obs_data_get_obj(root, "collections");
+		if (collections) {
+			obs_data_t *section = obs_data_get_obj(collections, m_currentCollection.toUtf8().constData());
+			if (section) {
+				LoadTimersFromSection(section);
+				obs_data_release(section);
+			}
+			obs_data_release(collections);
+		}
+		obs_data_release(root);
 	}
 
-	obs_data_release(settings);
+	m_loading = false;
+}
+
+void TMinusDock::HandleCollectionRenamed()
+{
+	const QString oldName = m_currentCollection;
+	m_currentCollection = CurrentCollectionName();
+	if (oldName == m_currentCollection)
+		return;
+
+	// Drop the section stored under the old name, then re-save the
+	// in-memory timers under the new one.
+	obs_data_t *root = ReadConfigRoot();
+	if (root) {
+		obs_data_t *collections = obs_data_get_obj(root, "collections");
+		if (collections) {
+			obs_data_erase(collections, oldName.toUtf8().constData());
+			obs_data_set_obj(root, "collections", collections);
+			obs_data_release(collections);
+			WriteConfigRoot(root);
+		}
+		obs_data_release(root);
+	}
+
+	SaveSettings();
+}
+
+void TMinusDock::PruneDeletedCollections()
+{
+	obs_data_t *root = ReadConfigRoot();
+	if (!root)
+		return;
+
+	obs_data_t *collections = obs_data_get_obj(root, "collections");
+	if (!collections) {
+		obs_data_release(root);
+		return;
+	}
+
+	char **names = obs_frontend_get_scene_collections();
+
+	QStringList stale;
+	for (obs_data_item_t *item = obs_data_first(collections); item; obs_data_item_next(&item)) {
+		const char *key = obs_data_item_get_name(item);
+		bool exists = false;
+		for (char **name = names; name && *name; name++) {
+			if (strcmp(*name, key) == 0) {
+				exists = true;
+				break;
+			}
+		}
+		if (!exists)
+			stale.append(QString::fromUtf8(key));
+	}
+
+	if (names) {
+		for (char **name = names; *name; name++)
+			bfree(*name);
+		bfree(names);
+	}
+
+	if (!stale.isEmpty()) {
+		for (const QString &key : stale)
+			obs_data_erase(collections, key.toUtf8().constData());
+		obs_data_set_obj(root, "collections", collections);
+		WriteConfigRoot(root);
+	}
+
+	obs_data_release(collections);
+	obs_data_release(root);
 }
 
 void TMinusDock::RegisterGlobalHotkeys(obs_data_t *savedData)
@@ -265,8 +444,28 @@ void TMinusDock::OBSFrontendEventHandler(enum obs_frontend_event event, void *da
 		}
 		break;
 
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+	case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
+		// Persist timers and current hotkey bindings before OBS tears
+		// down and reloads state for the new collection/profile.
+		dock->SaveSettings();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		dock->ReloadForCurrentCollection();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_RENAMED:
+		dock->HandleCollectionRenamed();
+		break;
+
+	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED:
+		dock->PruneDeletedCollections();
+		break;
+
 	case OBS_FRONTEND_EVENT_EXIT:
 		dock->SaveSettings();
+		dock->m_exitSaveDone = true;
 		break;
 
 	default:

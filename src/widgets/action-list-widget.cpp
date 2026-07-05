@@ -100,7 +100,7 @@ void ActionListWidget::SetupEditForms()
 	});
 	connect(m_filterNameCombo, QOverload<int>::of(&QComboBox::currentIndexChanged), this,
 		&ActionListWidget::OnEditFieldChanged);
-	connect(m_filterEnabledCheck, &QCheckBox::checkStateChanged, this, &ActionListWidget::OnEditFieldChanged);
+	connect(m_filterEnabledCheck, &QCheckBox::toggled, this, &ActionListWidget::OnEditFieldChanged);
 
 	// Page 2: SwitchScene
 	auto *scenePage = new QWidget();
