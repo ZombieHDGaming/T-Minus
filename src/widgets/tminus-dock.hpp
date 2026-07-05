@@ -31,8 +31,17 @@ private:
 	void SetupUI();
 	void SaveSettings();
 	void LoadSavedSettings();
+	void ReloadForCurrentCollection();
+	void HandleCollectionRenamed();
+	void PruneDeletedCollections();
+	void ClearTimers();
+	void LoadTimersFromSection(obs_data_t *section);
 	void RegisterGlobalHotkeys(obs_data_t *savedData);
 	void UnregisterGlobalHotkeys();
+
+	obs_data_t *ReadConfigRoot() const;
+	void WriteConfigRoot(obs_data_t *root) const;
+	static QString CurrentCollectionName();
 
 	static void OBSFrontendEventHandler(enum obs_frontend_event event, void *data);
 
@@ -48,6 +57,7 @@ private:
 	int m_stopAllHotkeyId = -1;
 	bool m_exitSaveDone = false;
 	bool m_loading = false;
+	QString m_currentCollection;
 
 	static constexpr const char *CONFIG_FILE = "config.json";
 };
