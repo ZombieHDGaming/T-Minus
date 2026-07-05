@@ -45,6 +45,10 @@ TimerWidget::TimerWidget(QWidget *parent, obs_data_t *savedData) : QWidget(paren
 
 	m_engine->configure(m_data.timerType, m_data.countdownDuration, m_data.targetDateTime);
 	UpdateDisplay(m_engine->currentTimeMs());
+
+	// Register hotkeys immediately so timers added at runtime get them
+	// without an OBS restart. savedData restores saved key bindings.
+	RegisterHotkeys(savedData);
 }
 
 TimerWidget::~TimerWidget()
@@ -182,11 +186,21 @@ void TimerWidget::OnSettingsClicked()
 {
 	TimerSettingsDialog dialog(m_data, this);
 	if (dialog.exec() == QDialog::Accepted) {
+		const QString oldName = m_data.displayName;
 		dialog.ApplyToData(m_data);
 
 		UpdateHeaderLabels();
 		m_engine->configure(m_data.timerType, m_data.countdownDuration, m_data.targetDateTime);
 		UpdateDisplay(m_engine->currentTimeMs());
+
+		if (m_data.displayName != oldName) {
+			// Re-register (preserving bindings) so hotkey
+			// descriptions pick up the new name.
+			ReregisterAllHotkeys();
+		} else {
+			// Register any add-time hotkeys created in the dialog.
+			RegisterHotkeys(nullptr);
+		}
 
 		emit settingsChanged();
 	}
@@ -195,18 +209,25 @@ void TimerWidget::OnSettingsClicked()
 void TimerWidget::RegisterHotkeys(obs_data_t *savedData)
 {
 	std::string idStr = m_data.timerId.toStdString();
+	// Use the display name in hotkey descriptions so entries in
+	// OBS Settings > Hotkeys are recognizable.
+	QString timerLabel = m_data.displayName.isEmpty() ? m_data.timerId : m_data.displayName;
 
-	std::string startPauseName = "TMinus_StartPause_" + idStr;
-	std::string startPauseDesc = "T-Minus: Start/Pause Timer (" + idStr + ")";
-	LoadHotkey(
-		m_data.startPauseHotkeyId, startPauseName.c_str(), startPauseDesc.c_str(),
-		[this]() { ToggleStartPause(); }, "Start/Pause Timer " + idStr, savedData);
+	if (m_data.startPauseHotkeyId == -1) {
+		std::string startPauseName = "TMinus_StartPause_" + idStr;
+		std::string startPauseDesc = QString("T-Minus: Start/Pause Timer (%1)").arg(timerLabel).toStdString();
+		LoadHotkey(
+			m_data.startPauseHotkeyId, startPauseName.c_str(), startPauseDesc.c_str(),
+			[this]() { ToggleStartPause(); }, "Start/Pause Timer " + idStr, savedData);
+	}
 
-	std::string restartName = "TMinus_Restart_" + idStr;
-	std::string restartDesc = "T-Minus: Restart Timer (" + idStr + ")";
-	LoadHotkey(
-		m_data.restartHotkeyId, restartName.c_str(), restartDesc.c_str(), [this]() { RestartTimer(); },
-		"Restart Timer " + idStr, savedData);
+	if (m_data.restartHotkeyId == -1) {
+		std::string restartName = "TMinus_Restart_" + idStr;
+		std::string restartDesc = QString("T-Minus: Restart Timer (%1)").arg(timerLabel).toStdString();
+		LoadHotkey(
+			m_data.restartHotkeyId, restartName.c_str(), restartDesc.c_str(), [this]() { RestartTimer(); },
+			"Restart Timer " + idStr, savedData);
+	}
 
 	// Register dynamic add-time hotkeys
 	for (auto &entry : m_data.addTimeHotkeys) {
@@ -219,13 +240,32 @@ void TimerWidget::RegisterHotkeys(obs_data_t *savedData)
 		}
 
 		std::string name = entry.hotkeyRegistrationName.toStdString();
-		std::string desc = QString("T-Minus: %1 (%2)").arg(entry.label).arg(m_data.timerId).toStdString();
+		std::string desc = QString("T-Minus: %1 (%2)").arg(entry.label).arg(timerLabel).toStdString();
 		int deltaMs = entry.deltaSeconds * 1000;
 
 		LoadHotkey(
 			entry.hotkeyId, name.c_str(), desc.c_str(), [this, deltaMs]() { m_engine->addTime(deltaMs); },
 			"Add Time " + entry.label.toStdString(), savedData);
 	}
+}
+
+void TimerWidget::ReregisterAllHotkeys()
+{
+	// Preserve current key bindings across the unregister/register cycle
+	// (used when the timer is renamed so hotkey descriptions stay fresh).
+	obs_data_t *bindings = obs_data_create();
+
+	SaveHotkey(bindings, m_data.startPauseHotkeyId, ("TMinus_StartPause_" + m_data.timerId.toStdString()).c_str());
+	SaveHotkey(bindings, m_data.restartHotkeyId, ("TMinus_Restart_" + m_data.timerId.toStdString()).c_str());
+	for (const auto &entry : m_data.addTimeHotkeys) {
+		if (!entry.hotkeyRegistrationName.isEmpty())
+			SaveHotkey(bindings, entry.hotkeyId, entry.hotkeyRegistrationName.toUtf8().constData());
+	}
+
+	UnregisterHotkeys();
+	RegisterHotkeys(bindings);
+
+	obs_data_release(bindings);
 }
 
 void TimerWidget::UnregisterHotkeys()
@@ -276,16 +316,19 @@ void TimerWidget::SaveData(obs_data_t *obj)
 	SaveHotkey(obj, m_data.startPauseHotkeyId, ("TMinus_StartPause_" + m_data.timerId.toStdString()).c_str());
 	SaveHotkey(obj, m_data.restartHotkeyId, ("TMinus_Restart_" + m_data.timerId.toStdString()).c_str());
 
-	// Add-time hotkeys
+	// Add-time hotkeys. Key bindings are stored on the timer object keyed
+	// by registration name, which is where RegisterHotkeys looks them up.
 	obs_data_array_t *addTimeArray = obs_data_array_create();
 	for (const auto &entry : m_data.addTimeHotkeys) {
 		obs_data_t *entryObj = obs_data_create();
 		obs_data_set_string(entryObj, "label", entry.label.toUtf8().constData());
 		obs_data_set_int(entryObj, "deltaSeconds", entry.deltaSeconds);
 		obs_data_set_string(entryObj, "hotkeyRegName", entry.hotkeyRegistrationName.toUtf8().constData());
-		SaveHotkey(entryObj, entry.hotkeyId, entry.hotkeyRegistrationName.toUtf8().constData());
 		obs_data_array_push_back(addTimeArray, entryObj);
 		obs_data_release(entryObj);
+
+		if (!entry.hotkeyRegistrationName.isEmpty())
+			SaveHotkey(obj, entry.hotkeyId, entry.hotkeyRegistrationName.toUtf8().constData());
 	}
 	obs_data_set_array(obj, "addTimeHotkeys", addTimeArray);
 	obs_data_array_release(addTimeArray);

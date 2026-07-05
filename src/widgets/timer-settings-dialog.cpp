@@ -1,4 +1,5 @@
 #include "timer-settings-dialog.hpp"
+#include "../utils/obs-utils.hpp"
 
 #include <obs.h>
 #include <obs-frontend-api.h>
@@ -7,8 +8,11 @@
 #include <QHBoxLayout>
 #include <QDialogButtonBox>
 #include <QLabel>
+#include <QLocale>
 #include <QGroupBox>
 #include <QButtonGroup>
+
+#include <functional>
 
 TimerSettingsDialog::TimerSettingsDialog(const TimerData &data, QWidget *parent) : QDialog(parent)
 {
@@ -41,9 +45,10 @@ TimerSettingsDialog::TimerSettingsDialog(const TimerData &data, QWidget *parent)
 	m_secondsSpin->setValue(data.countdownDuration.seconds);
 
 	if (data.targetDateTime.isValid())
-		m_targetDateTimeEdit->setDateTime(data.targetDateTime);
+		SetTargetDateTime(data.targetDateTime);
 	else
-		m_targetDateTimeEdit->setDateTime(QDateTime::currentDateTime().addSecs(3600));
+		SetTargetDateTime(QDateTime::currentDateTime().addSecs(3600));
+	UpdateTargetSummary();
 
 	// Text source
 	PopulateTextSourceDropdown();
@@ -160,14 +165,49 @@ QWidget *TimerSettingsDialog::CreateGeneralTab()
 
 	layout->addWidget(m_countdownGroup);
 
-	// Time Until settings
-	m_timeUntilGroup = new QGroupBox("Target Date/Time", page);
+	// Time Until settings: calendar + time-of-day + quick presets with a
+	// live summary of how long the countdown will run.
+	m_timeUntilGroup = new QGroupBox("Target Date && Time", page);
 	auto *timeUntilLayout = new QVBoxLayout(m_timeUntilGroup);
 
-	m_targetDateTimeEdit = new QDateTimeEdit(QDateTime::currentDateTime().addSecs(3600));
-	m_targetDateTimeEdit->setCalendarPopup(true);
-	m_targetDateTimeEdit->setDisplayFormat("yyyy-MM-dd hh:mm:ss");
-	timeUntilLayout->addWidget(m_targetDateTimeEdit);
+	m_calendar = new QCalendarWidget();
+	m_calendar->setGridVisible(false);
+	m_calendar->setVerticalHeaderFormat(QCalendarWidget::NoVerticalHeader);
+	m_calendar->setMinimumDate(QDate::currentDate());
+	timeUntilLayout->addWidget(m_calendar);
+
+	auto *timeRow = new QHBoxLayout();
+	timeRow->addWidget(new QLabel("Time of day:"));
+	m_targetTimeEdit = new QTimeEdit();
+	const bool ampm = QLocale().timeFormat(QLocale::ShortFormat).contains(QLatin1Char('A'), Qt::CaseInsensitive);
+	m_targetTimeEdit->setDisplayFormat(ampm ? "h:mm:ss AP" : "HH:mm:ss");
+	timeRow->addWidget(m_targetTimeEdit, 1);
+	timeUntilLayout->addLayout(timeRow);
+
+	auto *presetRow = new QHBoxLayout();
+	presetRow->addWidget(new QLabel("Quick set:"));
+	auto addPreset = [this, presetRow](const QString &text, std::function<QDateTime()> calc) {
+		auto *btn = new QPushButton(text);
+		btn->setAutoDefault(false);
+		connect(btn, &QPushButton::clicked, this, [this, calc]() { SetTargetDateTime(calc()); });
+		presetRow->addWidget(btn);
+	};
+	addPreset("+15 min", []() { return QDateTime::currentDateTime().addSecs(15 * 60); });
+	addPreset("+1 hour", []() { return QDateTime::currentDateTime().addSecs(3600); });
+	addPreset("Next hour", []() {
+		QDateTime now = QDateTime::currentDateTime();
+		return QDateTime(now.date(), QTime(now.time().hour(), 0)).addSecs(3600);
+	});
+	addPreset("Midnight", []() { return QDateTime(QDate::currentDate().addDays(1), QTime(0, 0)); });
+	presetRow->addStretch();
+	timeUntilLayout->addLayout(presetRow);
+
+	m_targetSummaryLabel = new QLabel();
+	m_targetSummaryLabel->setWordWrap(true);
+	timeUntilLayout->addWidget(m_targetSummaryLabel);
+
+	connect(m_calendar, &QCalendarWidget::selectionChanged, this, &TimerSettingsDialog::UpdateTargetSummary);
+	connect(m_targetTimeEdit, &QTimeEdit::timeChanged, this, &TimerSettingsDialog::UpdateTargetSummary);
 
 	layout->addWidget(m_timeUntilGroup);
 
@@ -357,6 +397,46 @@ void TimerSettingsDialog::OnTimerTypeChanged()
 	UpdateTypeVisibility();
 }
 
+QDateTime TimerSettingsDialog::SelectedTargetDateTime() const
+{
+	return QDateTime(m_calendar->selectedDate(), m_targetTimeEdit->time());
+}
+
+void TimerSettingsDialog::SetTargetDateTime(const QDateTime &dt)
+{
+	m_calendar->setSelectedDate(dt.date());
+	m_targetTimeEdit->setTime(dt.time());
+	UpdateTargetSummary();
+}
+
+void TimerSettingsDialog::UpdateTargetSummary()
+{
+	const QDateTime target = SelectedTargetDateTime();
+	const qint64 secs = QDateTime::currentDateTime().secsTo(target);
+
+	if (secs <= 0) {
+		m_targetSummaryLabel->setStyleSheet("color: #d9534f;");
+		m_targetSummaryLabel->setText("The selected time is in the past — the timer will read zero.");
+		return;
+	}
+
+	const qint64 days = secs / 86400;
+	const qint64 hours = (secs % 86400) / 3600;
+	const qint64 minutes = (secs % 3600) / 60;
+
+	QStringList parts;
+	if (days > 0)
+		parts << QString("%1d").arg(days);
+	if (hours > 0 || days > 0)
+		parts << QString("%1h").arg(hours);
+	parts << QString("%1m").arg(minutes);
+
+	m_targetSummaryLabel->setStyleSheet("");
+	m_targetSummaryLabel->setText(QString("Counts down for %1 (until %2)")
+					      .arg(parts.join(" "))
+					      .arg(QLocale().toString(target, QLocale::ShortFormat)));
+}
+
 void TimerSettingsDialog::OnAddTimeHotkeyAdd()
 {
 	QString label = m_addTimeLabelEdit->text().trimmed();
@@ -407,7 +487,7 @@ void TimerSettingsDialog::ApplyToData(TimerData &data) const
 	data.countdownDuration.seconds = m_secondsSpin->value();
 
 	// TimeUntil
-	data.targetDateTime = m_targetDateTimeEdit->dateTime();
+	data.targetDateTime = SelectedTargetDateTime();
 
 	// Text source
 	QString sourceName = m_textSourceCombo->currentText();
@@ -429,16 +509,24 @@ void TimerSettingsDialog::ApplyToData(TimerData &data) const
 	// End actions
 	data.endActions = m_actionList->actions();
 
-	// Add-time hotkeys: compare old vs new
-	// Remove hotkeys that were deleted
+	// Add-time hotkeys. Entries copied into the dialog keep their
+	// hotkeyId/registrationName, new entries carry hotkeyId == -1 and get
+	// registered by the caller. Unregister entries deleted in the dialog.
 	QList<AddTimeHotkeyEntry> oldEntries = data.addTimeHotkeys;
 	data.addTimeHotkeys = m_addTimeEntries;
 
-	// Preserve hotkeyId and registrationName for entries that still exist
-	for (int i = 0; i < data.addTimeHotkeys.size(); i++) {
-		if (i < oldEntries.size() &&
-		    data.addTimeHotkeys[i].hotkeyRegistrationName == oldEntries[i].hotkeyRegistrationName) {
-			data.addTimeHotkeys[i].hotkeyId = oldEntries[i].hotkeyId;
+	for (const auto &old : oldEntries) {
+		if (old.hotkeyId == -1)
+			continue;
+
+		bool stillExists = false;
+		for (const auto &entry : data.addTimeHotkeys) {
+			if (entry.hotkeyId == old.hotkeyId) {
+				stillExists = true;
+				break;
+			}
 		}
+		if (!stillExists)
+			CleanupHotkey(old.hotkeyId);
 	}
 }

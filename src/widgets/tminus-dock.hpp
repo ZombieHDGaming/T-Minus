@@ -3,6 +3,8 @@
 #include "obs-dock-wrapper.hpp"
 #include "timer-widget.hpp"
 
+#include <obs-frontend-api.h>
+
 #include <QMetaType>
 #include <QVBoxLayout>
 #include <QScrollArea>
@@ -44,6 +46,8 @@ private:
 
 	int m_startAllHotkeyId = -1;
 	int m_stopAllHotkeyId = -1;
+	bool m_exitSaveDone = false;
+	bool m_loading = false;
 
 	static constexpr const char *CONFIG_FILE = "config.json";
 };
