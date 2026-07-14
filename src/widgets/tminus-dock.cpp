@@ -259,7 +259,26 @@ void TMinusDock::LoadTimersFromSection(obs_data_t *section)
 	size_t count = obs_data_array_count(timerArray);
 	for (size_t i = 0; i < count; i++) {
 		obs_data_t *timerObj = obs_data_array_item(timerArray, i);
-		AddTimer(timerObj);
+
+		// Configs written by builds that double-loaded on startup can
+		// contain the same timer many times over; keep the first copy
+		// so such configs heal on the next save.
+		const QString id = QString::fromUtf8(obs_data_get_string(timerObj, "timerId"));
+		bool duplicate = false;
+		if (!id.isEmpty()) {
+			for (auto *existing : m_timers) {
+				if (existing->timerId() == id) {
+					duplicate = true;
+					break;
+				}
+			}
+		}
+
+		if (duplicate)
+			obs_log(LOG_WARNING, "Skipping duplicate saved timer entry: %s", id.toUtf8().constData());
+		else
+			AddTimer(timerObj);
+
 		obs_data_release(timerObj);
 	}
 	obs_data_array_release(timerArray);
@@ -267,6 +286,10 @@ void TMinusDock::LoadTimersFromSection(obs_data_t *section)
 
 void TMinusDock::LoadSavedSettings()
 {
+	// Idempotence guard: if timers were already loaded (e.g. by a scene
+	// collection event that slipped in first), don't stack a second copy.
+	ClearTimers();
+
 	m_loading = true;
 
 	obs_data_t *root = ReadConfigRoot();
@@ -374,11 +397,22 @@ void TMinusDock::PruneDeletedCollections()
 
 	char **names = obs_frontend_get_scene_collections();
 
+	// An empty enumeration means the frontend has no collection list to
+	// offer (e.g. still starting up); pruning against it would treat every
+	// stored section as stale and delete all saved timers.
+	if (!names || !*names) {
+		if (names)
+			bfree(names);
+		obs_data_release(collections);
+		obs_data_release(root);
+		return;
+	}
+
 	QStringList stale;
 	for (obs_data_item_t *item = obs_data_first(collections); item; obs_data_item_next(&item)) {
 		const char *key = obs_data_item_get_name(item);
 		bool exists = false;
-		for (char **name = names; name && *name; name++) {
+		for (char **name = names; *name; name++) {
 			if (strcmp(*name, key) == 0) {
 				exists = true;
 				break;
@@ -388,11 +422,9 @@ void TMinusDock::PruneDeletedCollections()
 			stale.append(QString::fromUtf8(key));
 	}
 
-	if (names) {
-		for (char **name = names; *name; name++)
-			bfree(*name);
-		bfree(names);
-	}
+	for (char **name = names; *name; name++)
+		bfree(*name);
+	bfree(names);
 
 	if (!stale.isEmpty()) {
 		for (const QString &key : stale)
@@ -408,11 +440,11 @@ void TMinusDock::PruneDeletedCollections()
 void TMinusDock::RegisterGlobalHotkeys(obs_data_t *savedData)
 {
 	LoadHotkey(
-		m_startAllHotkeyId, "TMinus_StartAll", "T-Minus: Start All Timers", [this]() { StartAllTimers(); },
-		"Start All Timers", savedData);
+		m_startAllHotkeyId, "TMinus_StartAll", "T-Minus: Start All Timers", this,
+		[this]() { StartAllTimers(); }, "Start All Timers", savedData);
 
 	LoadHotkey(
-		m_stopAllHotkeyId, "TMinus_StopAll", "T-Minus: Stop All Timers", [this]() { StopAllTimers(); },
+		m_stopAllHotkeyId, "TMinus_StopAll", "T-Minus: Stop All Timers", this, [this]() { StopAllTimers(); },
 		"Stop All Timers", savedData);
 }
 
@@ -430,6 +462,7 @@ void TMinusDock::OBSFrontendEventHandler(enum obs_frontend_event event, void *da
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		dock->m_finishedLoading = true;
 		dock->LoadSavedSettings();
 		break;
 
@@ -444,23 +477,32 @@ void TMinusDock::OBSFrontendEventHandler(enum obs_frontend_event event, void *da
 		}
 		break;
 
+	// OBS 31+ delivers scene collection events during startup, before
+	// FINISHED_LOADING. Acting on them then would load every timer twice
+	// per launch (the config doubles on each run until OBS can no longer
+	// start) and prune/save against half-initialized frontend state, so
+	// collection events are ignored until the first full load completed.
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
 	case OBS_FRONTEND_EVENT_PROFILE_CHANGING:
 		// Persist timers and current hotkey bindings before OBS tears
 		// down and reloads state for the new collection/profile.
-		dock->SaveSettings();
+		if (dock->m_finishedLoading)
+			dock->SaveSettings();
 		break;
 
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
-		dock->ReloadForCurrentCollection();
+		if (dock->m_finishedLoading)
+			dock->ReloadForCurrentCollection();
 		break;
 
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_RENAMED:
-		dock->HandleCollectionRenamed();
+		if (dock->m_finishedLoading)
+			dock->HandleCollectionRenamed();
 		break;
 
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_LIST_CHANGED:
-		dock->PruneDeletedCollections();
+		if (dock->m_finishedLoading)
+			dock->PruneDeletedCollections();
 		break;
 
 	case OBS_FRONTEND_EVENT_EXIT:

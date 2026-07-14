@@ -1,14 +1,15 @@
 #include "obs-utils.hpp"
 
 #include <QCryptographicHash>
+#include <QMetaObject>
 #include <QUuid>
 
 std::unordered_map<int, RegisterHotkeyCallbackData *> g_hotkeyCallbackDataMap;
 
-void LoadHotkey(int &id, const char *name, const char *description, std::function<void()> function,
+void LoadHotkey(int &id, const char *name, const char *description, QObject *context, std::function<void()> function,
 		std::string buttonLogMessage, obs_data_t *savedData)
 {
-	RegisterHotkeyCallbackData *callbackData = new RegisterHotkeyCallbackData{function, buttonLogMessage};
+	RegisterHotkeyCallbackData *callbackData = new RegisterHotkeyCallbackData{function, buttonLogMessage, context};
 
 	id = (int)obs_hotkey_register_frontend(name, description, (obs_hotkey_func)HotkeyCallback, callbackData);
 
@@ -53,7 +54,12 @@ void HotkeyCallback(void *incoming_data, obs_hotkey_id id, obs_hotkey_t *hotkey,
 	if (pressed) {
 		auto *data = static_cast<RegisterHotkeyCallbackData *>(incoming_data);
 		obs_log(LOG_INFO, "%s (hotkey)", data->hotkeyLogMessage.c_str());
-		data->function();
+
+		// Hotkey callbacks arrive on the libobs hotkey thread; the
+		// handlers drive Qt widgets, so run them on the UI thread.
+		QObject *context = data->context;
+		if (context)
+			QMetaObject::invokeMethod(context, data->function, Qt::QueuedConnection);
 	}
 }
 

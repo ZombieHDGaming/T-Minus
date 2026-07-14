@@ -217,7 +217,7 @@ void TimerWidget::RegisterHotkeys(obs_data_t *savedData)
 		std::string startPauseName = "TMinus_StartPause_" + idStr;
 		std::string startPauseDesc = QString("T-Minus: Start/Pause Timer (%1)").arg(timerLabel).toStdString();
 		LoadHotkey(
-			m_data.startPauseHotkeyId, startPauseName.c_str(), startPauseDesc.c_str(),
+			m_data.startPauseHotkeyId, startPauseName.c_str(), startPauseDesc.c_str(), this,
 			[this]() { ToggleStartPause(); }, "Start/Pause Timer " + idStr, savedData);
 	}
 
@@ -225,8 +225,8 @@ void TimerWidget::RegisterHotkeys(obs_data_t *savedData)
 		std::string restartName = "TMinus_Restart_" + idStr;
 		std::string restartDesc = QString("T-Minus: Restart Timer (%1)").arg(timerLabel).toStdString();
 		LoadHotkey(
-			m_data.restartHotkeyId, restartName.c_str(), restartDesc.c_str(), [this]() { RestartTimer(); },
-			"Restart Timer " + idStr, savedData);
+			m_data.restartHotkeyId, restartName.c_str(), restartDesc.c_str(), this,
+			[this]() { RestartTimer(); }, "Restart Timer " + idStr, savedData);
 	}
 
 	// Register dynamic add-time hotkeys
@@ -244,8 +244,9 @@ void TimerWidget::RegisterHotkeys(obs_data_t *savedData)
 		int deltaMs = entry.deltaSeconds * 1000;
 
 		LoadHotkey(
-			entry.hotkeyId, name.c_str(), desc.c_str(), [this, deltaMs]() { m_engine->addTime(deltaMs); },
-			"Add Time " + entry.label.toStdString(), savedData);
+			entry.hotkeyId, name.c_str(), desc.c_str(), this,
+			[this, deltaMs]() { m_engine->addTime(deltaMs); }, "Add Time " + entry.label.toStdString(),
+			savedData);
 	}
 }
 
@@ -358,6 +359,8 @@ void TimerWidget::SaveData(obs_data_t *obj)
 void TimerWidget::LoadData(obs_data_t *obj)
 {
 	m_data.timerId = obs_data_get_string(obj, "timerId");
+	if (m_data.timerId.isEmpty())
+		m_data.timerId = GenerateUniqueID();
 	m_data.displayName = obs_data_get_string(obj, "displayName");
 	m_data.timerType = static_cast<TimerType>(obs_data_get_int(obj, "timerType"));
 
