@@ -8,6 +8,66 @@
 #include <QGroupBox>
 #include <QLabel>
 
+// The hotkey combos display the translated hotkey description
+// (obs_hotkey_get_description) while carrying the registration name in the
+// item data; the registration name is what gets saved and triggered.
+
+static QString HotkeyComboValue(const QComboBox *combo)
+{
+	int idx = combo->currentIndex();
+	if (idx >= 0 && combo->currentText() == combo->itemText(idx))
+		return combo->itemData(idx).toString();
+	// Manually typed registration name
+	return combo->currentText();
+}
+
+static void SetHotkeyComboValue(QComboBox *combo, const QString &name)
+{
+	int idx = combo->findData(name);
+	if (idx >= 0)
+		combo->setCurrentIndex(idx);
+	else
+		combo->setEditText(name);
+}
+
+static void AddHotkeyComboItem(QComboBox *combo, obs_hotkey_t *hotkey)
+{
+	const char *name = obs_hotkey_get_name(hotkey);
+	if (!name || !name[0])
+		return;
+	const char *desc = obs_hotkey_get_description(hotkey);
+	combo->addItem((desc && desc[0]) ? QString::fromUtf8(desc) : QString::fromUtf8(name), QString::fromUtf8(name));
+}
+
+// Translated description for a saved registration name, for display in the
+// action list; falls back to the name when the hotkey isn't registered right
+// now (e.g. its timer or source lives in another scene collection).
+static QString HotkeyDisplayName(const QString &name)
+{
+	if (name.isEmpty())
+		return name;
+
+	struct Search {
+		QByteArray target;
+		QString description;
+	} search = {name.toUtf8(), QString()};
+
+	obs_enum_hotkeys(
+		[](void *data, obs_hotkey_id, obs_hotkey_t *hotkey) -> bool {
+			auto *search = static_cast<Search *>(data);
+			const char *hkName = obs_hotkey_get_name(hotkey);
+			if (!hkName || search->target != hkName)
+				return true;
+			const char *desc = obs_hotkey_get_description(hotkey);
+			if (desc && desc[0])
+				search->description = QString::fromUtf8(desc);
+			return false;
+		},
+		&search);
+
+	return search.description.isEmpty() ? name : search.description;
+}
+
 ActionListWidget::ActionListWidget(QWidget *parent) : QWidget(parent)
 {
 	SetupUI();
@@ -311,13 +371,8 @@ void ActionListWidget::LoadStepIntoEditor(int index)
 
 	case ActionType::TriggerGlobalHotkey:
 		PopulateGlobalHotkeyDropdown();
-		if (!step.globalHotkeyName.isEmpty()) {
-			int idx = m_globalHotkeyCombo->findText(step.globalHotkeyName);
-			if (idx >= 0)
-				m_globalHotkeyCombo->setCurrentIndex(idx);
-			else
-				m_globalHotkeyCombo->setEditText(step.globalHotkeyName);
-		}
+		if (!step.globalHotkeyName.isEmpty())
+			SetHotkeyComboValue(m_globalHotkeyCombo, step.globalHotkeyName);
 		break;
 
 	case ActionType::TriggerSourceHotkey:
@@ -327,13 +382,8 @@ void ActionListWidget::LoadStepIntoEditor(int index)
 			if (idx >= 0)
 				m_sourceHotkeySourceCombo->setCurrentIndex(idx);
 			PopulateSourceHotkeyDropdown(step.sourceHotkeySourceName);
-			if (!step.sourceHotkeyName.isEmpty()) {
-				idx = m_sourceHotkeyNameCombo->findText(step.sourceHotkeyName);
-				if (idx >= 0)
-					m_sourceHotkeyNameCombo->setCurrentIndex(idx);
-				else
-					m_sourceHotkeyNameCombo->setEditText(step.sourceHotkeyName);
-			}
+			if (!step.sourceHotkeyName.isEmpty())
+				SetHotkeyComboValue(m_sourceHotkeyNameCombo, step.sourceHotkeyName);
 		}
 		break;
 	}
@@ -365,12 +415,12 @@ void ActionListWidget::SaveEditorIntoStep(int index)
 		break;
 
 	case ActionType::TriggerGlobalHotkey:
-		step.globalHotkeyName = m_globalHotkeyCombo->currentText();
+		step.globalHotkeyName = HotkeyComboValue(m_globalHotkeyCombo);
 		break;
 
 	case ActionType::TriggerSourceHotkey:
 		step.sourceHotkeySourceName = m_sourceHotkeySourceCombo->currentText();
-		step.sourceHotkeyName = m_sourceHotkeyNameCombo->currentText();
+		step.sourceHotkeyName = HotkeyComboValue(m_sourceHotkeyNameCombo);
 		break;
 	}
 }
@@ -456,26 +506,22 @@ void ActionListWidget::PopulateSceneDropdown()
 
 void ActionListWidget::PopulateGlobalHotkeyDropdown()
 {
-	QString current = m_globalHotkeyCombo->currentText();
+	QString current = HotkeyComboValue(m_globalHotkeyCombo);
 	m_globalHotkeyCombo->clear();
 
 	obs_enum_hotkeys(
 		[](void *data, obs_hotkey_id, obs_hotkey_t *hotkey) -> bool {
 			auto *combo = static_cast<QComboBox *>(data);
-			const char *name = obs_hotkey_get_name(hotkey);
-			if (name && name[0])
-				combo->addItem(name);
+			// Only frontend-registered hotkeys are global; source
+			// hotkeys are covered by Trigger Source Hotkey.
+			if (obs_hotkey_get_registerer_type(hotkey) == OBS_HOTKEY_REGISTERER_FRONTEND)
+				AddHotkeyComboItem(combo, hotkey);
 			return true;
 		},
 		m_globalHotkeyCombo);
 
-	if (!current.isEmpty()) {
-		int idx = m_globalHotkeyCombo->findText(current);
-		if (idx >= 0)
-			m_globalHotkeyCombo->setCurrentIndex(idx);
-		else
-			m_globalHotkeyCombo->setEditText(current);
-	}
+	if (!current.isEmpty())
+		SetHotkeyComboValue(m_globalHotkeyCombo, current);
 }
 
 void ActionListWidget::PopulateSourceHotkeyDropdown(const QString &sourceName)
@@ -488,31 +534,29 @@ void ActionListWidget::PopulateSourceHotkeyDropdown(const QString &sourceName)
 	if (!source)
 		return;
 
-	// Enumerate all hotkeys and find ones associated with this source
+	// Enumerate all hotkeys and find ones associated with this source.
+	// Source hotkeys are registered with the source's weak reference as
+	// the registerer, so that is what the comparison has to use.
+	obs_weak_source_t *weak = obs_source_get_weak_source(source);
+
 	struct SourceHotkeyEnumData {
 		QComboBox *combo;
-		obs_source_t *source;
+		obs_weak_source_t *weak;
 	};
 
-	SourceHotkeyEnumData enumData = {m_sourceHotkeyNameCombo, source};
+	SourceHotkeyEnumData enumData = {m_sourceHotkeyNameCombo, weak};
 
 	obs_enum_hotkeys(
 		[](void *data, obs_hotkey_id, obs_hotkey_t *hotkey) -> bool {
 			auto *enumData = static_cast<SourceHotkeyEnumData *>(data);
-			// Check if this hotkey belongs to our source by checking registration type
-			obs_hotkey_registerer_t regType = obs_hotkey_get_registerer_type(hotkey);
-			if (regType == OBS_HOTKEY_REGISTERER_SOURCE) {
-				void *regData = obs_hotkey_get_registerer(hotkey);
-				if (regData == enumData->source) {
-					const char *name = obs_hotkey_get_name(hotkey);
-					if (name && name[0])
-						enumData->combo->addItem(name);
-				}
-			}
+			if (obs_hotkey_get_registerer_type(hotkey) == OBS_HOTKEY_REGISTERER_SOURCE &&
+			    obs_hotkey_get_registerer(hotkey) == enumData->weak)
+				AddHotkeyComboItem(enumData->combo, hotkey);
 			return true;
 		},
 		&enumData);
 
+	obs_weak_source_release(weak);
 	obs_source_release(source);
 }
 
@@ -531,10 +575,10 @@ QString ActionListWidget::ActionStepToString(const ActionStep &step)
 	case ActionType::Delay:
 		return QString("Delay: %1 ms").arg(step.delayMs);
 	case ActionType::TriggerGlobalHotkey:
-		return QString("Global Hotkey: \"%1\"").arg(step.globalHotkeyName);
+		return QString("Global Hotkey: \"%1\"").arg(HotkeyDisplayName(step.globalHotkeyName));
 	case ActionType::TriggerSourceHotkey:
 		return QString("Source Hotkey: \"%1\" on \"%2\"")
-			.arg(step.sourceHotkeyName)
+			.arg(HotkeyDisplayName(step.sourceHotkeyName))
 			.arg(step.sourceHotkeySourceName);
 	}
 	return "Unknown";

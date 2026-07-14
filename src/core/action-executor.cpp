@@ -170,17 +170,21 @@ void ActionExecutor::executeTriggerSourceHotkey(const ActionStep &step)
 
 	QByteArray nameBytes = step.sourceHotkeyName.toUtf8();
 
-	// Find the hotkey that belongs to this source
+	// Find the hotkey that belongs to this source. Source hotkeys are
+	// registered with the source's weak reference as the registerer, so
+	// that is what the comparison has to use.
+	obs_weak_source_t *weak = obs_source_get_weak_source(source);
+
 	struct SourceHotkeySearchData {
 		const char *targetName;
-		obs_source_t *targetSource;
+		obs_weak_source_t *targetWeak;
 		obs_hotkey_id foundId;
 		bool found;
 	};
 
 	SourceHotkeySearchData searchData;
 	searchData.targetName = nameBytes.constData();
-	searchData.targetSource = source;
+	searchData.targetWeak = weak;
 	searchData.foundId = OBS_INVALID_HOTKEY_ID;
 	searchData.found = false;
 
@@ -191,18 +195,18 @@ void ActionExecutor::executeTriggerSourceHotkey(const ActionStep &step)
 
 			if (name && strcmp(name, search->targetName) == 0) {
 				obs_hotkey_registerer_t regType = obs_hotkey_get_registerer_type(hotkey);
-				if (regType == OBS_HOTKEY_REGISTERER_SOURCE) {
-					void *regData = obs_hotkey_get_registerer(hotkey);
-					if (regData == search->targetSource) {
-						search->foundId = id;
-						search->found = true;
-						return false;
-					}
+				if (regType == OBS_HOTKEY_REGISTERER_SOURCE &&
+				    obs_hotkey_get_registerer(hotkey) == search->targetWeak) {
+					search->foundId = id;
+					search->found = true;
+					return false;
 				}
 			}
 			return true;
 		},
 		&searchData);
+
+	obs_weak_source_release(weak);
 
 	if (searchData.found) {
 		obs_hotkey_trigger_routed_callback(searchData.foundId, true);
