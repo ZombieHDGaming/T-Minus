@@ -57,6 +57,7 @@ private:
 	int m_stopAllHotkeyId = -1;
 	bool m_exitSaveDone = false;
 	bool m_loading = false;
+	bool m_finishedLoading = false;
 	QString m_currentCollection;
 
 	static constexpr const char *CONFIG_FILE = "config.json";
